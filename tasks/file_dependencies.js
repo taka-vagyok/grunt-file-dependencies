@@ -19,7 +19,10 @@ module.exports = function(grunt) {
       while(match = regex.exec(fileContent)) {
         matches.push(match[1]);
       }
-      return matches;
+      // remove duplicates
+      return matches.filter(function (x, i, self) {
+            return self.indexOf(x) === i;
+        });;
     }
 
     options = this.options({
@@ -31,7 +34,7 @@ module.exports = function(grunt) {
         return extractMatches(fileContent, options.extractRequiresRegex);
       },
       extractDefinesRegex: /define\s*\(\s*['"]([^'"]+)['"]/g,
-      extractRequiresRegex: /require\s*\(\s*['"]([^'"]+)['"]/g
+      extractRequiresRegex: /require\s*\(\s*['"]([^'"]+)['"]/g,
     });
 
     var orderedFiles = getOrderedFiles(this.filesSrc);
@@ -39,21 +42,59 @@ module.exports = function(grunt) {
   });
 
   function getOrderedFiles(files) {
+    var detectCycle = false;
+    // fdm's requires are resolved.
     var orderedFiles = [],
-        fileDependencyMap = getFileDependencyMapFromFiles(files);
-    while(Object.keys(fileDependencyMap).length) {
+        fdm = getFileDependencyMapFromFiles(files);
+    while(Object.keys(fdm).length) {
+      // found end
       var nextFiles = [];
-      for (var file in fileDependencyMap) {
-        if (hasRequiresInMap(fileDependencyMap[file].requires, fileDependencyMap))
+      for (var file in fdm) {
+        // if found required, it is not order now.
+        var existReq = hasRequiresInMap(fdm[file].requires, fdm);
+        if ( existReq ){
           continue;
+        }
         nextFiles.push(file);
-        delete fileDependencyMap[file];
+        delete fdm[file];
       }
+      // if not found because of removing map, there is cycle error
       if (nextFiles.length === 0) {
-        logCyclicDependencyError(fileDependencyMap);
+        detectCycle = true;
         break;
       }
       orderedFiles.push.apply(orderedFiles, nextFiles);
+    }
+    if( detectCycle === true){
+      var nodes = {};
+      var filelink = {};
+      for (var file in fdm){
+        if ( fdm[file].defines === undefined ){
+          continue;
+        }
+        for( var def in fdm[file].defines ){
+          nodes[fdm[file].defines[def]] = file;
+          filelink[file] = 0;
+        }
+      }
+      // write edges
+      for (var file in fdm){
+        if ( fdm[file].requires === undefined ){
+          continue;
+        }
+        for( var req in fdm[file].requires ){
+          var rname = fdm[file].requires[req];
+          if( nodes[rname] !== undefined ){
+            filelink[nodes[rname]] = filelink[nodes[rname]]+1;
+          }
+        }
+      }
+      for (var file in fdm){
+        if( filelink[file] === 0 ){
+          delete fdm[file];
+        }
+      }
+      logCyclicDependencyError(fdm);
     }
     return orderedFiles;
   }
@@ -114,15 +155,27 @@ module.exports = function(grunt) {
     var map = {};
     fileInfos.forEach(function(fileInfo) {
       var requires = {};
+      var defines = [];
+      for(var key in defineMap ) {
+        if (defineMap[key] === fileInfo.path){
+          defines.push(key);
+        }
+      }
       fileInfo.requires.forEach(function(require) {
         var file = defineMap[require];
-        if (file)
-          requires[defineMap[require]] = true;
+        if (file){
+          // skip depended in same file
+          //if( options.skipRequiredMyself && file === fileInfo.path ){
+          if( file !== fileInfo.path ){
+            requires[file] = require;
+          }
+        }
         else {
           warn('Definition for "'+require+'" was not found, but is required by "'+fileInfo.path+'".');
         }
       });
       map[fileInfo.path] = {
+        defines: defines,
         requires: requires
       };
     });
@@ -130,9 +183,11 @@ module.exports = function(grunt) {
   }
 
   function hasRequiresInMap(requires, map) {
-    for (var require in requires)
-      if (require in map)
+    for (var require in requires){
+      if (require in map){
         return true;
+      }
+    }
     return false;
   }
 
@@ -140,10 +195,56 @@ module.exports = function(grunt) {
     grunt.log.writeln('WARNING'['yellow'].bold+': '+message['yellow']);
   }
 
+  function mkdot(filename, fdm){
+    var nodes = [];
+    var fs = require('fs');
+    var ofd = fs.openSync(filename, "w");
+    fs.writeSync(ofd, "digraph dependency {\n");
+    fs.writeSync(ofd, "\trankdir=LR;\n");
+    // write nodes with file cluster
+    for (var file in fdm){
+      if ( fdm[file].defines === undefined ){
+        continue;
+      }
+      var cname = "cluster_" + file.replace(/\//g,"_").replace(".", "_");
+      fs.writeSync(ofd, "\tsubgraph " + cname + " {\n");
+      fs.writeSync(ofd, "\t\trankdir=TB;\n");
+      for( var def in fdm[file].defines ){
+        var name = fdm[file].defines[def];
+        nodes.push(name);
+        fs.writeSync(ofd, "\t\t\"" + name + "\";\n");
+      }
+      fs.writeSync(ofd, "\t\tlabel=\"File: " + file + "\"\n");
+      fs.writeSync(ofd, "\t}\n");
+    }
+    // write edges
+    for (var file in fdm){
+      if ( fdm[file].defines === undefined ){
+        continue;
+      }
+      for( var def in fdm[file].defines ){
+          if ( fdm[file].requires === undefined ){
+            continue;
+          }
+          for( var req in fdm[file].requires ){
+            var rname = fdm[file].requires[req];
+            if( nodes.indexOf(rname) >= 0 ){
+              fs.writeSync(ofd, "\t\"" + fdm[file].defines[def]+ "\" -> \"" + rname + "\";\n");
+            }
+          }
+      }
+    }
+    fs.writeSync(ofd, "}\n");
+    fs.close(ofd);
+  }
+
   function logCyclicDependencyError(fileDependencyMap) {
     var message = 'A cyclic dependency was found among the following files:'+grunt.util.linefeed;
     for (var file in fileDependencyMap)
-      message += '  '+file+grunt.util.linefeed;
+      message += '  '+file+' '+JSON.stringify(fileDependencyMap[file]['requires'])+' '+grunt.util.linefeed;
+    var expfile ="./cyclemap.dot";
+    mkdot(expfile, fileDependencyMap);
+    message += "Export cycle dependency graph: " + expfile;
     grunt.fail.fatal(message);
   }
 
