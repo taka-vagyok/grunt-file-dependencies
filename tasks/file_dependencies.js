@@ -35,7 +35,7 @@ module.exports = function(grunt) {
         },
         extractDefinesRegex: /define\s*\(\s*['"]([^'"]+)['"]/g,
         extractRequiresRegex: /require\s*\(\s*['"]([^'"]+)['"]/g,
-        skipRequiredMyself: true,
+        skipRequiredMyself: false,
         cycleReport: "cyclemap.dot"
       });
 
@@ -43,59 +43,24 @@ module.exports = function(grunt) {
       writeOutput(this.files, orderedFiles, options);
 
       function getOrderedFiles(files) {
-        var detectCycle = false;
-        // fdm's requires are resolved.
         var orderedFiles = [],
           fdm = getFileDependencyMapFromFiles(files);
         while (Object.keys(fdm).length) {
-          // found end
           var nextFiles = [];
           for (var file in fdm) {
             // if found required, it is not order now.
-            var existReq = hasRequiresInMap(fdm[file].requires, fdm);
-            if (existReq) {
+            if (hasRequiresInMap(fdm[file].requires, fdm)) {
               continue;
             }
             nextFiles.push(file);
-            delete fdm[file];
+            delete fdm[fle];
           }
-          // if not found because of removing map, there is cycle error
           if (nextFiles.length === 0) {
-            detectCycle = true;
+            deleteIfNotLinkedItem(fdm);
+            logCyclicDependencyError(fdm);
             break;
           }
           orderedFiles.push.apply(orderedFiles, nextFiles);
-        }
-        if (detectCycle === true) {
-          var nodes = {};
-          var filelink = {};
-          for (var file in fdm) {
-            if (fdm[file].defines === undefined) {
-              continue;
-            }
-            for (var def in fdm[file].defines) {
-              nodes[fdm[file].defines[def]] = file;
-              filelink[file] = 0;
-            }
-          }
-          // write edges
-          for (var file in fdm) {
-            if (fdm[file].requires === undefined) {
-              continue;
-            }
-            for (var req in fdm[file].requires) {
-              var rname = fdm[file].requires[req];
-              if (nodes[rname] !== undefined) {
-                filelink[nodes[rname]] = filelink[nodes[rname]] + 1;
-              }
-            }
-          }
-          for (var file in fdm) {
-            if (filelink[file] === 0) {
-              delete fdm[file];
-            }
-          }
-          logCyclicDependencyError(fdm);
         }
         return orderedFiles;
       }
@@ -159,33 +124,32 @@ module.exports = function(grunt) {
         fileInfos.forEach(function(fileInfo) {
           var requires = {};
           var defines = [];
+          var fpath = fileInfo.path;
+          // defines
           for (var key in defineMap) {
-            if (defineMap[key] === fileInfo.path) {
+            if (defineMap[key] === fpath) {
               defines.push(key);
             }
           }
-          fileInfo.requires.forEach(function(require) {
-            var file = defineMap[require];
+          if (defines.length === 0) {
+            defines.push("---");
+          }
+          // requires
+          fileInfo.requires.forEach(function(req) {
+            var file = defineMap[req];
             if (file) {
-              // skip depended in same file
-              if (options.skipRequiredMyself) {
-                if (file !== fileInfo.path) {
-                  requires[file] = require;
+              if (options.skipRequiredMyself === true) {
+                if (file !== fpath) {
+                  requires[file] = req;
                 }
               } else {
-                requires[file] = require;
+                requires[file] = req;
               }
             } else {
-              warn(
-                'Definition for "' +
-                  require +
-                  '" was not found, but is required by "' +
-                  fileInfo.path +
-                  '".'
-              );
+              warn('Not found "' + req + '". required by "' + fpath + '".');
             }
           });
-          map[fileInfo.path] = {
+          map[fpath] = {
             defines: defines,
             requires: requires
           };
@@ -210,14 +174,13 @@ module.exports = function(grunt) {
         var nodes = [];
         var fs = require("fs");
         var ofd = fs.openSync(filename, "w");
+        var clusternum = 0;
         fs.writeSync(ofd, "digraph dependency {\n");
         fs.writeSync(ofd, "\trankdir=LR;\n");
         // write nodes with file cluster
         for (var file in fdm) {
-          if (fdm[file].defines === undefined) {
-            continue;
-          }
-          var cname = "cluster_" + file.replace(/\//g, "_").replace(".", "_");
+          clusternum += 1;
+          var cname = "cluster_" + clusternum;
           fs.writeSync(ofd, "\tsubgraph " + cname + " {\n");
           fs.writeSync(ofd, "\t\trankdir=TB;\n");
           for (var def in fdm[file].defines) {
@@ -230,9 +193,6 @@ module.exports = function(grunt) {
         }
         // write edges
         for (var file in fdm) {
-          if (fdm[file].defines === undefined) {
-            continue;
-          }
           for (var def in fdm[file].defines) {
             if (fdm[file].requires === undefined) {
               continue;
@@ -257,15 +217,10 @@ module.exports = function(grunt) {
           "A cyclic dependency was found among the following files:" +
           grunt.util.linefeed;
         for (var file in fileDependencyMap)
-          message +=
-            "  " +
-            file +
-            " " +
-            JSON.stringify(fileDependencyMap[file]["requires"]) +
-            " " +
-            grunt.util.linefeed;
+          message += "  " + file + grunt.util.linefeed;
         mkdot(options.cycleReport, fileDependencyMap);
-        message += "Export cycle dependency graph: " + options.cycleReport;
+        message +=
+          "See exported cycle dependency graph: " + options.cycleReport;
         grunt.fail.fatal(message);
       }
 
@@ -282,6 +237,35 @@ module.exports = function(grunt) {
           return dest == "src";
         });
         return dest != "src" ? dest : "";
+      }
+
+      function deleteIfNotLinkedItem(fdm) {
+        var hasDelete = true;
+        do {
+          hasDelete = false;
+          var nodes = {};
+          var filelink = {};
+          for (var file in fdm) {
+            filelink[file] = 0;
+            for (var def in fdm[file].defines) {
+              nodes[fdm[file].defines[def]] = file;
+            }
+          }
+          for (var file in fdm) {
+            for (var req in fdm[file].requires) {
+              var rname = fdm[file].requires[req];
+              if (nodes[rname] !== undefined) {
+                filelink[nodes[rname]] += 1;
+              }
+            }
+          }
+          for (var file in fdm) {
+            if (filelink[file] === 0) {
+              delete fdm[file];
+              hasDelete = true;
+            }
+          }
+        } while (hasDelete);
       }
     }
   );
