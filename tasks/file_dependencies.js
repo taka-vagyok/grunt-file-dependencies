@@ -53,7 +53,7 @@ module.exports = function(grunt) {
               continue;
             }
             nextFiles.push(file);
-            delete fdm[fle];
+            delete fdm[file];
           }
           if (nextFiles.length === 0) {
             deleteIfNotLinkedItem(fdm);
