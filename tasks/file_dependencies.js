@@ -36,28 +36,41 @@ module.exports = function(grunt) {
         extractDefinesRegex: /define\s*\(\s*['"]([^'"]+)['"]/g,
         extractRequiresRegex: /require\s*\(\s*['"]([^'"]+)['"]/g,
         skipRequiredMyself: false,
+        forceMakeFileList: false,
         cycleReport: "cyclemap.dot"
       });
 
       var orderedFiles = getOrderedFiles(this.filesSrc);
       writeOutput(this.files, orderedFiles, options);
 
+      function findNextFiles(fdm) {
+        var nextFiles = [];
+        for (var file in fdm) {
+          if (hasRequiresInMap(fdm[file].requires, fdm)) {
+            continue;
+          }
+          nextFiles.push(file);
+          delete fdm[file];
+        }
+        return nextFiles;
+      }
+
       function getOrderedFiles(files) {
         var orderedFiles = [],
           fdm = getFileDependencyMapFromFiles(files);
         while (Object.keys(fdm).length) {
-          var nextFiles = [];
-          for (var file in fdm) {
-            // if found required, it is not order now.
-            if (hasRequiresInMap(fdm[file].requires, fdm)) {
-              continue;
-            }
-            nextFiles.push(file);
-            delete fdm[file];
-          }
+          var nextFiles = findNextFiles(fdm);
           if (nextFiles.length === 0) {
-            deleteIfNotLinkedItem(fdm);
-            logCyclicDependencyError(fdm);
+            deleteIfNotLinkedFile(fdm);
+            if (options.forceMakeFileList === true) {
+              mkdot(fdm);
+              for (var file in fdm) {
+                nextFiles.push(file);
+                delete fdm[file];
+              }
+            } else {
+              logCyclicDependencyError(fdm);
+            }
             break;
           }
           orderedFiles.push.apply(orderedFiles, nextFiles);
@@ -120,41 +133,51 @@ module.exports = function(grunt) {
       }
 
       function createFileDependencyMap(fileInfos, defineMap) {
-        var map = {};
+        var fdm = {};
+        var notFounds = {};
         fileInfos.forEach(function(fileInfo) {
-          var requires = {};
-          var defines = [];
           var fpath = fileInfo.path;
-          // defines
-          for (var key in defineMap) {
-            if (defineMap[key] === fpath) {
-              defines.push(key);
-            }
+          if (fileInfo.defines.length === 0) {
+            fileInfo.defines.push("---");
           }
-          if (defines.length === 0) {
-            defines.push("---");
-          }
-          // requires
+          // resolved requires
+          var resolves = {};
           fileInfo.requires.forEach(function(req) {
             var file = defineMap[req];
             if (file) {
-              if (options.skipRequiredMyself === true) {
-                if (file !== fpath) {
-                  requires[file] = req;
-                }
-              } else {
-                requires[file] = req;
+              if (options.skipRequiredMyself === false) {
+                resolves[file] = req;
+              } else if (file !== fpath) {
+                resolves[file] = req;
               }
+            } else if (notFounds[req]) {
+              notFounds[req].push(fpath);
             } else {
-              warn('Not found "' + req + '". required by "' + fpath + '".');
+              notFounds[req] = [fpath];
             }
           });
-          map[fpath] = {
-            defines: defines,
-            requires: requires
+          fdm[fpath] = {
+            defines: fileInfo.defines,
+            requires: resolves
           };
         });
-        return map;
+        warnNotFoundRequired(notFounds);
+        return fdm;
+      }
+
+      function warnNotFoundRequired(notFounds) {
+        Object.keys(notFounds).forEach(function(req) {
+          var msg = 'Not found "' + req + '". ';
+          if (notFounds[req].length > 1) {
+            msg += "Required files:";
+            notFounds[req].forEach(function(path) {
+              msg += "\n  " + path + "";
+            });
+          } else {
+            msg += "Required file:\n  " + notFounds[req][0];
+          }
+          warn(msg);
+        });
       }
 
       function hasRequiresInMap(requires, map) {
@@ -170,10 +193,10 @@ module.exports = function(grunt) {
         grunt.log.writeln("WARNING"["yellow"].bold + ": " + message["yellow"]);
       }
 
-      function mkdot(filename, fdm) {
+      function mkdot(exportfile, fdm) {
         var nodes = [];
         var fs = require("fs");
-        var ofd = fs.openSync(filename, "w");
+        var ofd = fs.openSync(exportfile, "w");
         var clusternum = 0;
         fs.writeSync(ofd, "digraph dependency {\n");
         fs.writeSync(ofd, "\trankdir=LR;\n");
@@ -193,23 +216,21 @@ module.exports = function(grunt) {
         }
         // write edges
         for (var file in fdm) {
-          for (var def in fdm[file].defines) {
-            if (fdm[file].requires === undefined) {
-              continue;
-            }
-            for (var req in fdm[file].requires) {
-              var rname = fdm[file].requires[req];
+          var fileInfo = fdm[file];
+          for (var def in fileInfo.defines) {
+            for (var req in fileInfo.requires) {
+              var rname = fileInfo.requires[req];
               if (nodes.indexOf(rname) >= 0) {
-                fs.writeSync(
-                  ofd,
-                  '\t"' + fdm[file].defines[def] + '" -> "' + rname + '";\n'
-                );
+                var defname = fileInfo.defines[def];
+                fs.writeSync(ofd, '\t"' + defname + '" -> "' + rname + '";\n');
               }
             }
           }
         }
         fs.writeSync(ofd, "}\n");
-        fs.close(ofd);
+        fs.close(ofd, function(err) {
+          warn(err);
+        });
       }
 
       function logCyclicDependencyError(fileDependencyMap) {
@@ -239,7 +260,7 @@ module.exports = function(grunt) {
         return dest != "src" ? dest : "";
       }
 
-      function deleteIfNotLinkedItem(fdm) {
+      function deleteIfNotLinkedFile(fdm) {
         var hasDelete = true;
         do {
           hasDelete = false;
