@@ -37,7 +37,8 @@ module.exports = function(grunt) {
         extractRequiresRegex: /require\s*\(\s*['"]([^'"]+)['"]/g,
         skipRequiredMyself: false,
         forceMakeFileList: false,
-        cycleReport: "cyclemap.dot"
+        cycleDotReport: "CycleMap.dot",
+        notFoundReport: "NotFounds.csv"
       });
 
       var orderedFiles = getOrderedFiles(this.filesSrc);
@@ -63,7 +64,7 @@ module.exports = function(grunt) {
           if (nextFiles.length === 0) {
             deleteIfNotLinkedFile(fdm);
             if (options.forceMakeFileList === true) {
-              mkdot(fdm);
+              mkDot(fdm);
               for (var file in fdm) {
                 nextFiles.push(file);
                 delete fdm[file];
@@ -161,11 +162,30 @@ module.exports = function(grunt) {
             requires: resolves
           };
         });
-        warnNotFoundRequired(notFounds);
+        if (Object.keys(notFounds).length !== 0) {
+          exportNotFounds(notFounds, options.notFoundReport);
+          warnNotFoundRequires(notFounds);
+        }
         return fdm;
       }
 
-      function warnNotFoundRequired(notFounds) {
+      function exportNotFounds(notFounds, exportfile) {
+        var fs = require("fs");
+        var ofd = fs.openSync(exportfile, "w");
+        fs.writeSync(ofd, "required, files...\n");
+        Object.keys(notFounds).forEach(function(req) {
+          fs.writeSync(ofd, req);
+          notFounds[req].forEach(function(path) {
+            fs.writeSync(ofd, "," + path);
+          });
+          fs.writeSync(ofd, "\n");
+        });
+        fs.close(ofd, function(err) {
+          console.log(err);
+        });
+      }
+
+      function warnNotFoundRequires(notFounds) {
         Object.keys(notFounds).forEach(function(req) {
           var msg = 'Not found "' + req + '". ';
           if (notFounds[req].length > 1) {
@@ -193,7 +213,7 @@ module.exports = function(grunt) {
         grunt.log.writeln("WARNING"["yellow"].bold + ": " + message["yellow"]);
       }
 
-      function mkdot(exportfile, fdm) {
+      function mkDot(exportfile, fdm) {
         var nodes = [];
         var fs = require("fs");
         var ofd = fs.openSync(exportfile, "w");
@@ -206,8 +226,8 @@ module.exports = function(grunt) {
           var cname = "cluster_" + clusternum;
           fs.writeSync(ofd, "\tsubgraph " + cname + " {\n");
           fs.writeSync(ofd, "\t\trankdir=TB;\n");
-          for (var def in fdm[file].defines) {
-            var name = fdm[file].defines[def];
+          for (var df in fdm[file].defines) {
+            var name = fdm[file].defines[df];
             nodes.push(name);
             fs.writeSync(ofd, '\t\t"' + name + '";\n');
           }
@@ -216,13 +236,14 @@ module.exports = function(grunt) {
         }
         // write edges
         for (var file in fdm) {
-          var fileInfo = fdm[file];
-          for (var def in fileInfo.defines) {
-            for (var req in fileInfo.requires) {
-              var rname = fileInfo.requires[req];
-              if (nodes.indexOf(rname) >= 0) {
-                var defname = fileInfo.defines[def];
-                fs.writeSync(ofd, '\t"' + defname + '" -> "' + rname + '";\n');
+          var fileDfs = fdm[file].defines;
+          var fileRqs = fdm[file].requires;
+          for (var df in fileDfs) {
+            for (var rq in fileRqs) {
+              var rqname = fileRqs[rq];
+              if (nodes.indexOf(rqname) >= 0) {
+                var dfname = fileDfs[df];
+                fs.writeSync(ofd, '\t"' + dfname + '" -> "' + rqname + '";\n');
               }
             }
           }
@@ -239,9 +260,9 @@ module.exports = function(grunt) {
           grunt.util.linefeed;
         for (var file in fileDependencyMap)
           message += "  " + file + grunt.util.linefeed;
-        mkdot(options.cycleReport, fileDependencyMap);
+        mkDot(options.cycleDotReport, fileDependencyMap);
         message +=
-          "See exported cycle dependency graph: " + options.cycleReport;
+          "See exported cycle dependency graph: " + options.cycleDotReport;
         grunt.fail.fatal(message);
       }
 
