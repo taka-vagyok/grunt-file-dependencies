@@ -64,11 +64,18 @@ module.exports = function(grunt) {
           if (nextFiles.length === 0) {
             deleteIfNotLinkedFile(fdm);
             if (options.forceMakeFileList === true) {
-              mkDot(fdm);
+              mkDot(options.cycleDotReport, fdm);
+              var message =
+                "A cyclic dependency was found among the following files:";
               for (var file in fdm) {
+                message += grunt.util.linefeed + "  " + file;
                 nextFiles.push(file);
                 delete fdm[file];
               }
+              warn(message);
+              warn(
+                "See exported cycle dependency graph: " + options.cycleDotReport
+              );
             } else {
               logCyclicDependencyError(fdm);
             }
